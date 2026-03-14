@@ -58,10 +58,10 @@ const CONCURRENCY_LIMIT: usize = 64;
 #[clap(version, about)]
 pub(crate) struct Opts {
     /// Address for this server to listen on.
-    #[arg(short, long, default_value = "127.0.0.1", env = "LUMINOUS_TTV_ADDR")]
+    #[arg(short, long, default_value = "0.0.0.0", env = "HOST")]
     address: IpAddr,
     /// Port for this server to listen on.
-    #[arg(short, long, default_value = "9595", env = "LUMINOUS_TTV_PORT")]
+    #[arg(short, long, default_value = "10000", env = "PORT")]
     server_port: u16,
     /// Connect directly to Twitch, without a proxy. Useful when running this server remotely
     /// in a country where Twitch doesn't serve ads.
