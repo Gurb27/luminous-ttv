@@ -21,7 +21,7 @@ use clap::Parser;
 use extend::ext;
 use http::{
     header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, ORIGIN, REFERER, USER_AGENT},
-    HeaderValue, Method, Response, StatusCode,
+    HeaderName, HeaderValue, Method, Response, StatusCode,
 };
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
@@ -53,6 +53,8 @@ const LIVE_TTVLOL_ENDPOINT: &str = const_format::concatcp!("/playlist/{", ID_PAR
 // for Firefox only
 const STATUS_ENDPOINT: &str = "/stat/";
 const STATUS_TTVLOL_ENDPOINT: &str = "/ping"; // no trailing slash
+/// Twitch usher path - mirrors https://usher.ttvnw.net/api/channel/hls/{channel}.m3u8
+const API_CHANNEL_HLS_ENDPOINT: &str = "/api/channel/hls/{id}";
 const CONCURRENCY_LIMIT: usize = 64;
 
 #[derive(Parser, Debug)]
@@ -174,9 +176,14 @@ async fn main() -> Result<()> {
 
     #[allow(unused_mut)] // feature-gated
     let mut router = Router::new()
-        .route(VOD_ENDPOINT, get(process_vod))
-        .route(LIVE_ENDPOINT, get(process_live))
-        .route(LIVE_TTVLOL_ENDPOINT, get(process_live));
+        .route(VOD_ENDPOINT, get(process_vod).options(handle_preflight))
+        .route(LIVE_ENDPOINT, get(process_live).options(handle_preflight))
+        .route(LIVE_TTVLOL_ENDPOINT, get(process_live).options(handle_preflight))
+        .route(
+            API_CHANNEL_HLS_ENDPOINT,
+            get(process_api_channel_hls).options(handle_preflight),
+        )
+        .fallback(handle_404);
     #[cfg(feature = "true-status")]
     {
         router =
@@ -288,6 +295,35 @@ struct Status {
     online: bool,
 }
 
+/// Returns 200 OK with CORS preflight headers for OPTIONS requests.
+async fn handle_preflight() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*")),
+            (
+                HeaderName::from_static("access-control-allow-methods"),
+                HeaderValue::from_static("GET, POST, OPTIONS"),
+            ),
+            (
+                HeaderName::from_static("access-control-allow-headers"),
+                HeaderValue::from_static("*"),
+            ),
+        ],
+    )
+}
+
+/// Returns 404 for unmatched routes instead of closing the connection.
+async fn handle_404() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        [(
+            HeaderName::from_static("access-control-allow-origin"),
+            HeaderValue::from_static("*"),
+        )],
+    )
+}
+
 // in Chrome-like browsers the extension can download the M3U8, and if that succeeds redirect
 // to it in Base64 form. In Firefox that isn't permitted. Checking if the server is online before
 // redirecting to it reduces the chance of the extension breaking Twitch.
@@ -371,6 +407,35 @@ async fn process_live(
     let referer = headers.get(REFERER).cloned();
     let pd = match ProcessData::build(
         id, query, ua, state.user_agent.as_ref(), origin, referer, StreamID::Live,
+    ) {
+        Ok(pd) => pd,
+        Err(e) => return e.into_response(),
+    };
+    process(pd, &state).await.into_response()
+}
+
+/// Handles /api/channel/hls/{id} (mirrors Twitch usher path). Strips .m3u8 from id if present.
+async fn process_api_channel_hls(
+    Path(id): Path<String>,
+    Query(query): QueryMap,
+    headers: HeaderMap,
+    ua: Option<TypedHeader<UserAgent>>,
+    State(state): State<LState>,
+) -> Response<Body> {
+    let channel = id
+        .strip_suffix(".m3u8")
+        .unwrap_or(id.as_str())
+        .to_string();
+    let origin = headers.get(ORIGIN).cloned();
+    let referer = headers.get(REFERER).cloned();
+    let pd = match ProcessData::build(
+        channel,
+        query,
+        ua,
+        state.user_agent.as_ref(),
+        origin,
+        referer,
+        StreamID::Live,
     ) {
         Ok(pd) => pd,
         Err(e) => return e.into_response(),
