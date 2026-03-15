@@ -19,7 +19,7 @@ use cfg_if::cfg_if;
 use clap::Parser;
 use extend::ext;
 use http::{
-    header::{CACHE_CONTROL, USER_AGENT},
+    header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, USER_AGENT},
     HeaderValue, Response, StatusCode,
 };
 use rand::distr::Alphanumeric;
@@ -82,7 +82,7 @@ pub(crate) struct Opts {
     proxy: Option<Url>,
     /// Country to request a proxy in. See https://client.hola.org/client_cgi/vpn_countries.json.
     #[cfg(feature = "hola")]
-    #[arg(short, long, conflicts_with = "proxy", value_parser = parse_country, default_value = "ru")]
+    #[arg(short, long, conflicts_with = "proxy", value_parser = parse_country, default_value = "pl")]
     country: String,
     /// Don't save Hola credentials.
     #[cfg(feature = "hola")]
@@ -204,6 +204,10 @@ async fn main() -> Result<()> {
         .route(STATUS_ENDPOINT, get(status))
         .route(STATUS_TTVLOL_ENDPOINT, get(status)) // all TTV-LOL cares about is HTTP 200
         .layer(CorsLayer::new().allow_origin(Any))
+        .layer(SetResponseHeaderLayer::overriding(
+            ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        ))
         .layer(SetResponseHeaderLayer::overriding(
             CACHE_CONTROL,
             HeaderValue::from_static("no-cache, no-store"),
