@@ -10,6 +10,7 @@ use axum::{
     body::Body,
     error_handling::HandleErrorLayer,
     extract::{Path, Query, State},
+    http::HeaderMap,
     response::IntoResponse,
     routing::get,
     BoxError, Json, Router,
@@ -19,8 +20,8 @@ use cfg_if::cfg_if;
 use clap::Parser;
 use extend::ext;
 use http::{
-    header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, USER_AGENT},
-    HeaderValue, Response, StatusCode,
+    header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, ORIGIN, REFERER, USER_AGENT},
+    HeaderValue, Method, Response, StatusCode,
 };
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
@@ -203,7 +204,12 @@ async fn main() -> Result<()> {
     router = router
         .route(STATUS_ENDPOINT, get(status))
         .route(STATUS_TTVLOL_ENDPOINT, get(status)) // all TTV-LOL cares about is HTTP 200
-        .layer(CorsLayer::new().allow_origin(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS])
+                .allow_headers(Any),
+        )
         .layer(SetResponseHeaderLayer::overriding(
             ACCESS_CONTROL_ALLOW_ORIGIN,
             HeaderValue::from_static("*"),
@@ -307,6 +313,10 @@ pub(crate) struct ProcessData {
     sid: StreamID,
     query: HashMap<String, String>,
     user_agent: UserAgent,
+    /// Origin from the incoming request; forwarded to Twitch for browser-like appearance.
+    origin: Option<HeaderValue>,
+    /// Referer from the incoming request; forwarded to Twitch for browser-like appearance.
+    referer: Option<HeaderValue>,
 }
 
 impl ProcessData {
@@ -315,6 +325,8 @@ impl ProcessData {
         query: HashMap<String, String>,
         ua: Option<TypedHeader<UserAgent>>,
         ua_override: Option<&HeaderValue>,
+        origin: Option<HeaderValue>,
+        referer: Option<HeaderValue>,
         enum_type: F,
     ) -> AppResult<Self> {
         let (id, query) = if let Some((id, query)) = id.split_once(".m3u8?") {
@@ -330,7 +342,13 @@ impl ProcessData {
             (id.into_ascii_lowercase(), query)
         };
         let user_agent = common::get_user_agent(ua, ua_override)?;
-        Ok(Self { sid: enum_type(id), query, user_agent })
+        Ok(Self {
+            sid: enum_type(id),
+            query,
+            user_agent,
+            origin,
+            referer,
+        })
     }
 }
 
@@ -345,10 +363,15 @@ type QueryMap = Query<HashMap<String, String>>;
 async fn process_live(
     Path(id): Path<String>,
     Query(query): QueryMap,
+    headers: HeaderMap,
     ua: Option<TypedHeader<UserAgent>>,
     State(state): State<LState>,
 ) -> Response<Body> {
-    let pd = match ProcessData::build(id, query, ua, state.user_agent.as_ref(), StreamID::Live) {
+    let origin = headers.get(ORIGIN).cloned();
+    let referer = headers.get(REFERER).cloned();
+    let pd = match ProcessData::build(
+        id, query, ua, state.user_agent.as_ref(), origin, referer, StreamID::Live,
+    ) {
         Ok(pd) => pd,
         Err(e) => return e.into_response(),
     };
@@ -358,10 +381,15 @@ async fn process_live(
 async fn process_vod(
     Path(id): Path<String>,
     Query(query): QueryMap,
+    headers: HeaderMap,
     ua: Option<TypedHeader<UserAgent>>,
     State(state): State<LState>,
 ) -> Response<Body> {
-    let pd = match ProcessData::build(id, query, ua, state.user_agent.as_ref(), StreamID::VOD) {
+    let origin = headers.get(ORIGIN).cloned();
+    let referer = headers.get(REFERER).cloned();
+    let pd = match ProcessData::build(
+        id, query, ua, state.user_agent.as_ref(), origin, referer, StreamID::VOD,
+    ) {
         Ok(pd) => pd,
         Err(e) => return e.into_response(),
     };
@@ -413,9 +441,20 @@ async fn get_m3u8(client: &Client, pd: &ProcessData, token: PlaybackAccessToken)
         .append_pair("sig", &token.signature)
         .append_pair("acmb", "e30=");
     // "acmb" appears to be a tracking param, copy not permitted; value of e30= is empty object
-    let m3u = client
+    let req = client
         .get(url.as_str())
-        .header(USER_AGENT, pd.user_agent.as_str())
+        .header(USER_AGENT, pd.user_agent.as_str());
+    let req = if let Some(ref v) = pd.origin {
+        req.header(ORIGIN, v.clone())
+    } else {
+        req
+    };
+    let req = if let Some(ref v) = pd.referer {
+        req.header(REFERER, v.clone())
+    } else {
+        req
+    };
+    let m3u = req
         .send()
         .await?
         .error_for_status()?
@@ -463,12 +502,23 @@ async fn get_token(state: &LState, pd: &ProcessData) -> Result<AccessTokenRespon
     //  2022-04-16: No longer seeing it
     //  2023-06-02: it's definitely back
 
-    Ok(state
+    let req = state
         .client
         .post("https://gql.twitch.tv/gql")
         .header("Client-ID", state.twitch_client_id)
         .header("Device-ID", &generate_id())
-        .header(USER_AGENT, pd.user_agent.as_str())
+        .header(USER_AGENT, pd.user_agent.as_str());
+    let req = if let Some(ref v) = pd.origin {
+        req.header(ORIGIN, v.clone())
+    } else {
+        req
+    };
+    let req = if let Some(ref v) = pd.referer {
+        req.header(REFERER, v.clone())
+    } else {
+        req
+    };
+    Ok(req
         .json(&request)
         .send()
         .await?
